@@ -40,8 +40,11 @@ parser.add_argument('--tau', type=int, default=5, help="trying to learn states t
 parser.add_argument('--addskipconnections', dest='skip_connections', action='store_true')
 parser.add_argument('--experiment_name', type=str, default="default")
 parser.add_argument('--action_norm', type=float, default=1.0)
+parser.add_argument('--l2reg_d', dest='l2_reg_d', action='store_true')
+parser.add_argument('--l2reg_g', dest='l2_reg_g', action='store_true')
+parser.add_argument('--l2regparam', type=float, default=0.0001)
 parser.set_defaults(batch_norm=True, spectral_norm=True, grad_penalty=True, diversity_sensitivity=False,
-                    skip_connections=False)
+                    skip_connections=False, l2_reg_d=False, l2_reg_g=False)
 args = parser.parse_args()
 
 num_discrim_updates = args.num_discrim_updates
@@ -99,9 +102,9 @@ std_distance_emp_tau = np.std(distances)
 
 def sample_batch(size):
     traj_ind = np.random.randint(0, num_trajs, size)
-    state_ind = np.random.randint(0, traj_length-2*tau, size)
+    state_ind = np.random.randint(0, traj_length-tau, size)
     goal_ind = (state_ind + tau + np.round(np.random.random(state_ind.shape)*(traj_length-1-(state_ind+tau)))).astype(int)
-    target_state_ind = goal_ind - tau
+    target_state_ind = state_ind + tau
     return torch.tensor(data[traj_ind, state_ind, ...], dtype=torch.float32).to(device), \
            torch.tensor(data[traj_ind, goal_ind, ...], dtype=torch.float32).to(device), \
            torch.tensor(data[traj_ind, target_state_ind, ...], dtype=torch.float32).to(device)
@@ -144,7 +147,7 @@ def big_eval(batch_size, num_future_states):
     goals = goals.unsqueeze(1).repeat(1, num_future_states, 1).view(-1, state_dim)
     z = torch.randn(states.size(0), latent_dim).to(device)
     gen_future_states = netG(z, states, goals)
-    distances = (goals-gen_future_states).norm(dim=-1)
+    distances = (states-gen_future_states).norm(dim=-1)
     loss_record["big_eval_avg_distance"].append(distances.mean().item())
     loss_record["big_eval_std_distance"].append(distances.std().item())
 
@@ -175,6 +178,11 @@ for epoch in range(train_steps):
         loss_D = loss_D_p1 + grad_loss
     else:
         loss_D = loss_D_p1
+    if args.l2_reg_d:
+        p_d = 0
+        for p in netD.parameters():
+            p_d += torch.dot(p.view(-1), p.view(-1))
+        loss_D += p_d*args.l2regparam
     loss_D.backward()
     loss_record["D"].append(loss_D_p1.item())
     str_to_print = "[Epoch: %d/%d] [D_loss (base): %f] " % (epoch, train_steps, loss_D_p1.item())
@@ -184,7 +192,7 @@ for epoch in range(train_steps):
         str_to_print += "[D_loss (tot): %f]" % (loss_D.item())
     optimiser_D.step()
 
-    distances = (goals - gen_target_states).norm(dim=-1)
+    distances = (current_states - gen_target_states).norm(dim=-1)
     avg_distance = torch.mean(distances).item()
     std_distance = torch.std(distances).item()
     loss_record["avg_distance"].append(avg_distance)
@@ -200,7 +208,7 @@ for epoch in range(train_steps):
         errD_fake = netD(current_states, gen_target_states, goals)
         loss_G_p1 = errD_fake.mean()
         if args.diversity_sensitivity:
-            z_alt = z = torch.randn(batch_size, latent_dim, dtype=torch.float32).to(device)
+            z_alt = torch.randn(batch_size, latent_dim, dtype=torch.float32).to(device)
             gen_target_states_alt = netG(z_alt, current_states, goals).detach()
             state_diff_l1 = F.l1_loss(gen_target_states, gen_target_states_alt, reduce=False).sum(dim=-1) / state_dim
             z_diff_l1 = F.l1_loss(z.detach(), z_alt.detach(), reduce=False).sum(dim=-1) / latent_dim
@@ -208,6 +216,11 @@ for epoch in range(train_steps):
             loss_G = loss_G_p1 + ds_loss
         else:
             loss_G = loss_G_p1
+        if args.l2_reg_g:
+            p_g = 0.0
+            for p in netG.parameters():
+                p_g += torch.dot(p.view(-1), p.view(-1))
+            loss_G += args.l2regparam*p_g
         loss_G.backward()
         loss_record["G"].append(loss_G_p1.item())
         str_to_print += "[G_loss (base): %f] " % loss_G_p1.item()

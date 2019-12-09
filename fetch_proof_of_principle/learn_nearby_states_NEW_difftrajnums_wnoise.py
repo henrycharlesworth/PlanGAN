@@ -50,6 +50,7 @@ parser.add_argument('--alternative_ds_normalisation', dest='alt_ds_norm', action
 parser.add_argument('--l2reg_d', dest='l2_reg_d', action='store_true')
 parser.add_argument('--l2reg_g', dest='l2_reg_g', action='store_true')
 parser.add_argument('--l2regparam', type=float, default=0.0001)
+parser.add_argument('--data_noise', type=float, default=0.01)
 
 parser.add_argument('--h1', type=int, default=0)
 parser.add_argument('--h2', type=int, default=0)
@@ -70,6 +71,7 @@ tau = args.tau
 num_trajs = args.num_trajs
 experiment_name = args.experiment_name
 state_dim = 3 #just use goals as input/output
+noise = args.data_noise
 
 os.makedirs("results", exist_ok=True)
 os.makedirs("results/nearby_states", exist_ok=True)
@@ -128,15 +130,19 @@ def sample_batch(size):
     traj_ind = np.random.randint(0, num_trajs, size)
     state_ind = np.random.randint(0, traj_length-tau, size)
     future_state_ind = state_ind + tau
-    return torch.tensor(data[traj_ind, state_ind, ...], dtype=torch.float32).to(device), \
-           torch.tensor(data[traj_ind, future_state_ind, ...], dtype=torch.float32).to(device)
+    noise_1 = noise*np.random.randn(size, state_dim)
+    noise_2 = noise*np.random.randn(size, state_dim)
+    return torch.tensor(data[traj_ind, state_ind, ...] + noise_1, dtype=torch.float32).to(device), \
+           torch.tensor(data[traj_ind, future_state_ind, ...] + noise_2, dtype=torch.float32).to(device)
 
 def sample_batch_val(size):
     traj_ind = np.random.randint(0, num_val, size)
     state_ind = np.random.randint(0, traj_length - tau, size)
     future_state_ind = state_ind + tau
-    return torch.tensor(data_val[traj_ind, state_ind, ...], dtype=torch.float32).to(device), \
-           torch.tensor(data_val[traj_ind, future_state_ind, ...], dtype=torch.float32).to(device)
+    noise_1 = noise * np.random.randn(size, state_dim)
+    noise_2 = noise * np.random.randn(size, state_dim)
+    return torch.tensor(data_val[traj_ind, state_ind, ...]+noise_1, dtype=torch.float32).to(device), \
+           torch.tensor(data_val[traj_ind, future_state_ind, ...]+noise_2, dtype=torch.float32).to(device)
 
 """GENERATOR/DISCRIMINATOR NETWORKS"""
 if args.h1 == 0:

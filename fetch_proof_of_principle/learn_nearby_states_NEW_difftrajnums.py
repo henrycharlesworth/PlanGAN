@@ -35,6 +35,7 @@ parser.add_argument('--ds_loss_coeff', type=float, default=1.0)
 parser.add_argument('--data_size', type=int, default=1000000)
 parser.add_argument('--traj_length', type=int, default=100, help="length of trajectories")
 parser.add_argument('--train_steps', type=int, default=1000000)
+parser.add_argument('--num_trajs', type=int, default=100)
 parser.add_argument('--eval_every', type=int, default=10000)
 parser.add_argument('--tau', type=int, default=5, help="trying to learn states tau steps into future")
 parser.add_argument('--addskipconnections', dest='skip_connections', action='store_true')
@@ -66,7 +67,7 @@ data_size = args.data_size
 traj_length = args.traj_length
 train_steps = args.train_steps
 tau = args.tau
-num_trajs = int(data_size / traj_length)
+num_trajs = args.num_trajs
 experiment_name = args.experiment_name
 state_dim = 3 #just use goals as input/output
 
@@ -85,8 +86,8 @@ env.reset()
 #env.render() #have to do this to generate images -_-
 #env.viewer._hide_overlay = True
 #env.viewer.vopt.geomgroup[0] ^= 1 #hide robot/table
-if os.path.exists("data_nearby_states.pkl"):
-    data = joblib.load("data_nearby_states.pkl")
+if os.path.exists("data"+str(num_trajs)+"_"+str(traj_length)+".pkl"):
+    data = joblib.load("data"+str(num_trajs)+"_"+str(traj_length)+".pkl")
 else:
     data = np.zeros((num_trajs, traj_length, state_dim))
     for t in range(num_trajs):
@@ -96,11 +97,22 @@ else:
             obs, _, _, _ = env.step(env.action_space.sample())
             data[t,s,:] = obs["achieved_goal"]
         print("Traj %d generated" % t)
-    joblib.dump(data, "data_nearby_states.pkl")
+    joblib.dump(data, "data"+str(num_trajs)+"_"+str(traj_length)+".pkl")
     print("Data generated successfully!")
+
+num_val = 100
+data_val = np.zeros((num_val, traj_length, state_dim))
+for t in range(num_val):
+    obs = env.reset()
+    data_val[t,0,:] = obs["achieved_goal"]
+    for s in range(1, traj_length):
+        obs, _, _, _ = env.step(env.action_space.sample())
+        data_val[t,s,:] = obs["achieved_goal"]
+    print("Val traj %d generated" % t)
 
 scaler = StandardScaler()
 data = scaler.fit_transform(data.reshape(-1, state_dim)).reshape(num_trajs, traj_length, state_dim)
+data_val = scaler.transform(data_val.reshape(-1, state_dim)).reshape(num_val, traj_length, state_dim)
 
 s_ind = np.array(range(0, traj_length-tau))
 t_ind = np.array([i for i in range(num_trajs) for _ in range(len(s_ind))])
@@ -118,6 +130,13 @@ def sample_batch(size):
     future_state_ind = state_ind + tau
     return torch.tensor(data[traj_ind, state_ind, ...], dtype=torch.float32).to(device), \
            torch.tensor(data[traj_ind, future_state_ind, ...], dtype=torch.float32).to(device)
+
+def sample_batch_val(size):
+    traj_ind = np.random.randint(0, num_val, size)
+    state_ind = np.random.randint(0, traj_length - tau, size)
+    future_state_ind = state_ind + tau
+    return torch.tensor(data_val[traj_ind, state_ind, ...], dtype=torch.float32).to(device), \
+           torch.tensor(data_val[traj_ind, future_state_ind, ...], dtype=torch.float32).to(device)
 
 """GENERATOR/DISCRIMINATOR NETWORKS"""
 if args.h1 == 0:
@@ -225,10 +244,12 @@ def generate_sample_states(num_images, num_future_states, epoch):
     plt.savefig(filename)
 
 def big_eval(batch_size, num_future_states):
-    states, _ = sample_batch(batch_size)
+    states, _ = sample_batch_val(batch_size)
     states = states.unsqueeze(1).repeat(1, num_future_states, 1).view(-1, state_dim)
     z = torch.randn(states.size(0), latent_dim).to(device)
+    netG.eval()
     gen_future_states = netG(z, states)
+    netG.train()
     distances = (states-gen_future_states).norm(dim=-1)
     loss_record["big_eval_avg_distance"].append(distances.mean().item())
     loss_record["big_eval_std_distance"].append(distances.std().item())

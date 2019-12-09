@@ -46,8 +46,17 @@ parser.add_argument('--generator_clamp_val', type=float, default=3.0)
 parser.add_argument('--generator_tanh', dest='tanh_g', action='store_true')
 parser.add_argument('--generator_tanh_value', type=float, default=3.0)
 parser.add_argument('--alternative_ds_normalisation', dest='alt_ds_norm', action='store_true')
+parser.add_argument('--l2reg_d', dest='l2_reg_d', action='store_true')
+parser.add_argument('--l2reg_g', dest='l2_reg_g', action='store_true')
+parser.add_argument('--l2regparam', type=float, default=0.0001)
+
+parser.add_argument('--h1', type=int, default=0)
+parser.add_argument('--h2', type=int, default=0)
+parser.add_argument('--h3', type=int, default=0)
 parser.set_defaults(batch_norm=True, spectral_norm=True, grad_penalty=True, diversity_sensitivity=False,
-                    skip_connections=False, clamp_d=False, clamp_g=False, tanh_g=False, alt_ds_norm=False)
+                    skip_connections=False, clamp_d=False, clamp_g=False, tanh_g=False, alt_ds_norm=False,
+                    l2_reg_d=False, l2_reg_g=False)
+
 args = parser.parse_args()
 
 num_discrim_updates = args.num_discrim_updates
@@ -111,8 +120,16 @@ def sample_batch(size):
            torch.tensor(data[traj_ind, future_state_ind, ...], dtype=torch.float32).to(device)
 
 """GENERATOR/DISCRIMINATOR NETWORKS"""
-hidden_sizes_G = [128, 256, 512]
-hidden_sizes_D = [512, 256, 128]
+if args.h1 == 0:
+    hidden_sizes_G = [128, 256, 512]
+    hidden_sizes_D = [512, 256, 128]
+else:
+    hidden_sizes_G = [args.h1]
+    if args.h2 != 0:
+        hidden_sizes_G.append(args.h2)
+    if args.h3 != 0:
+        hidden_sizes_G.append(args.h3)
+    hidden_sizes_D = list(reversed(hidden_sizes_G))
 if args.clamp_d:
     clamp_d = True
     clamp_d_val = args.discriminator_clamp_val
@@ -252,6 +269,11 @@ for epoch in range(train_steps):
         loss_D = loss_D_p1 + grad_loss
     else:
         loss_D = loss_D_p1
+    if args.l2_reg_d:
+        p_d = 0
+        for p in netD.parameters():
+            p_d += torch.dot(p.view(-1), p.view(-1))
+        loss_D += p_d*args.l2regparam
     loss_D.backward()
     total_norm = 0
     for p in netD.parameters():
@@ -297,6 +319,11 @@ for epoch in range(train_steps):
             loss_G = loss_G_p1 + ds_loss
         else:
             loss_G = loss_G_p1
+        if args.l2_reg_g:
+            p_g = 0.0
+            for p in netG.parameters():
+                p_g += torch.dot(p.view(-1), p.view(-1))
+            loss_G += args.l2regparam*p_g
         loss_G.backward()
         total_norm = 0
         for p in netG.parameters():
@@ -315,6 +342,5 @@ for epoch in range(train_steps):
     if epoch % args.eval_every == 0:
         joblib.dump(loss_record, "results/nearby_states/"+experiment_name+"/losses.pkl")
         joblib.dump((netG.state_dict(), netD.state_dict()), "results/nearby_states/"+experiment_name+"/parameters.pkl")
-        generate_sample_states(6, 8, epoch)
+        #generate_sample_states(6, 8, epoch)
         big_eval(500, 500)
-

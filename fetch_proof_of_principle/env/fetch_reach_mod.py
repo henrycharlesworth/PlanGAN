@@ -18,8 +18,8 @@ class FetchReachMod(fetch_env.FetchEnv, utils.EzPickle):
         self.n_substeps = n_substeps
         self.random_start = random_start
         self.initial_gripper_xpos = np.array([1.34, 0.749, 0.534])
-        self.goal_range = np.stack((self.initial_gripper_xpos - np.array([0.25, 0.25, 0.18]),
-                                    self.initial_gripper_xpos + np.array([0.25, 0.25, 0.18])))
+        self.goal_range = np.stack((self.initial_gripper_xpos - np.array([0.2, 0.2, 0.13]),
+                                    self.initial_gripper_xpos + np.array([0.2, 0.2, 0.13])))
         fetch_env.FetchEnv.__init__(
             self, MODEL_XML_PATH, has_object=False, block_gripper=True, n_substeps=n_substeps,
             gripper_extra_height=0.2, target_in_the_air=True, target_offset=0.0,
