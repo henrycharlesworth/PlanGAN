@@ -5,10 +5,6 @@ import os
 import numpy as np
 
 import joblib
-try:
-    saved_states = joblib.load("envs/clustered_saved_states_100_fetchpush.pkl")
-except:
-    saved_states = joblib.load("clustered_saved_states_100_fetchpush.pkl")
 
 default_initial_qpos = {
             'robot0:slide0': 0.405,
@@ -42,7 +38,7 @@ class FetchPush(fetch_env.FetchEnv, utils.EzPickle):
             self.name = "fetch_push_reduced"
             self.state_dim = 6
         elif remove_gripper:
-            self.name = "fetch_push_ng"
+            self.name = "fetch_push"
             self.state_dim = 24
         else:
             self.state_dim = 28
@@ -151,127 +147,3 @@ class FetchPushRandomStart(FetchPush):
         goal += self.target_offset
         goal[2] = self.height_offset
         return goal.copy()
-
-
-
-#rotations we can apply to cube so that physically nothing is different
-quaternion_invariants = np.concatenate(
-    ((1.0/np.sqrt(2))*np.array([
-        [1, 1, 0, 0],
-        [1, -1, 0, 0],
-        [1, 0, 1, 0],
-        [1, 0, -1, 0],
-        [1, 0, 0, 1],
-        [1, 0, 0, -1]
-    ]),
-    np.array([
-        [0, 1, 0, 0],
-        [0, 0, 1, 0],
-        [0, 0, 0, 1],
-        [0, -1, 0, 0],
-        [0, 0, -1, 0],
-        [0, 0, 0, -1]
-    ])), axis=0
-)
-
-class FetchPushRotInvariant(FetchPush):
-    def _get_obs(self):
-        # positions
-        grip_pos = self.sim.data.get_site_xpos('robot0:grip')
-        dt = self.sim.nsubsteps * self.sim.model.opt.timestep
-        grip_velp = self.sim.data.get_site_xvelp('robot0:grip') * dt
-        robot_qpos, robot_qvel = robot_get_obs(self.sim)
-        if self.has_object:
-            object_pos = self.sim.data.get_site_xpos('object0')
-            # rotations
-            object_rot_sin = np.sin(rotations.mat2euler(
-                self.sim.data.get_site_xmat('object0')))  # MODIFIED - easier for model to not predict big changes.
-            # object_rot_sin = rotations.mat2euler(self.sim.data.get_site_xmat('object0'))
-            object_rot_cos = np.cos(rotations.mat2euler(self.sim.data.get_site_xmat('object0')))
-            # velocities
-            object_velp = self.sim.data.get_site_xvelp('object0') * dt
-            object_velr = self.sim.data.get_site_xvelr('object0') * dt
-            # gripper state
-            object_rel_pos = object_pos - grip_pos
-            object_velp -= grip_velp
-        else:
-            object_pos = object_rot = object_velp = object_velr = object_rel_pos = np.zeros(0)
-        gripper_state = robot_qpos[-2:]
-        gripper_vel = robot_qvel[-2:] * dt  # change to a scalar if the gripper is made symmetric
-
-        if not self.has_object:
-            achieved_goal = grip_pos.copy()
-        else:
-            achieved_goal = np.squeeze(object_pos.copy())
-        if self.remove_gripper:
-            obs = np.concatenate([
-                grip_pos, object_pos.ravel(), object_rel_pos.ravel(), object_rot_sin.ravel(),
-                object_rot_cos.ravel(),
-                object_velp.ravel(), object_velr.ravel(), grip_velp,
-            ])
-        else:
-            obs = np.concatenate([
-                grip_pos, object_pos.ravel(), object_rel_pos.ravel(), gripper_state, object_rot_sin.ravel(),
-                object_rot_cos.ravel(),
-                object_velp.ravel(), object_velr.ravel(), grip_velp, gripper_vel,
-            ])
-        if self.reduced:
-            obs = obs[:6]
-
-        return {
-            'observation': obs.copy(),
-            'achieved_goal': achieved_goal.copy(),
-            'desired_goal': self.goal.copy(),
-        }
-
-
-
-# class FetchPushRandomStart(FetchPush):
-#     def __init__(self, distance_threshold=0.05, reduced=False, remove_gripper=False, x_qpos_range=[0.26, 0.54],
-#                  y_qpos_range=[0.33, 0.63], z_qpos_range=[0.0, 0.15]):
-#         self.x_qpos_range = x_qpos_range
-#         self.y_qpos_range = y_qpos_range
-#         self.z_qpos_range = z_qpos_range
-#         FetchPush.__init__(self, distance_threshold=distance_threshold, reduced=reduced, remove_gripper=remove_gripper)
-#
-#     def _reset_sim(self):
-#         init_qpos = default_initial_qpos
-#         init_qpos['robot0:slide0'] = self.np_random.uniform(self.x_qpos_range[0], self.x_qpos_range[1], size=1)
-#         init_qpos['robot0:slide1'] = self.np_random.uniform(self.y_qpos_range[0], self.y_qpos_range[1], size=1)
-#         init_qpos['robot0:slide2'] = self.np_random.uniform(self.z_qpos_range[0], self.z_qpos_range[1], size=1)
-#         self._env_setup(initial_qpos=init_qpos)
-#
-#         object_xpos = self.initial_gripper_xpos[:2]
-#         while np.linalg.norm(object_xpos - self.initial_gripper_xpos[:2]) < 0.1:
-#             object_xpos = self.initial_gripper_xpos[:2] + self.np_random.uniform(-self.obj_range, self.obj_range, size=2)
-#         object_qpos = self.sim.data.get_joint_qpos('object0:joint')
-#         assert object_qpos.shape == (7,)
-#         object_qpos[:2] = object_xpos
-#         self.sim.data.set_joint_qpos('object0:joint', object_qpos)
-#
-#         self.sim.forward()
-#         return True
-#
-#     def _sample_goal(self):
-#         goal = default_gripper_pos + self.np_random.uniform(-self.target_range, self.target_range, size=3)
-#         goal += self.target_offset
-#         goal[2] = self.height_offset
-#         return goal.copy()
-
-
-
-if __name__ == "__main__":
-    import time
-    # env = FetchPush()
-    # for i in range(50):
-    #     env.reset()
-    #     env.render()
-    #     for j in range(50):
-    #         env.step(env.action_space.sample())
-    #         env.render()
-
-    env = FetchPushRandomStart()
-    for i in range(500):
-        env.reset()
-        env.render()
-        time.sleep(0.1)

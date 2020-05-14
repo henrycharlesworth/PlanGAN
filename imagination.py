@@ -4,17 +4,13 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler
 
 class ImaginationModule:
-    def __init__(self, G_nets, D_nets, G_opts, D_opts, one_step_model, latent_dim, tau=4, div_sensitivity=True,
-                 ds_coeff=1.0, ds_final_only=False, l2_reg_D=0.0, l2_reg_G=0.0, reg_with_osm=False, l2_loss_coeff=0.3,
-                 use_all_osms_for_each_gan=False, device="cpu"):
+    def __init__(self, G_nets, D_nets, G_opts, D_opts, one_step_model, latent_dim, tau=5, l2_reg_D=0.0, l2_reg_G=0.0,
+                 reg_with_osm=True, l2_loss_coeff=30.0, use_all_osms_for_each_gan=False, device="cpu"):
         self.G_nets = G_nets
         self.D_nets = D_nets
         self.G_opts = G_opts
         self.D_opts = D_opts
         self.one_step_model = one_step_model
-        self.div_sensitivity = div_sensitivity
-        self.ds_coef = ds_coeff
-        self.ds_final_only = ds_final_only
         self.l2_reg_D = l2_reg_D
         self.l2_reg_G = l2_reg_G
         self.reg_with_osm = reg_with_osm
@@ -27,28 +23,6 @@ class ImaginationModule:
         self.goal_scaler = StandardScaler()
         self.use_all_osms_for_each_gan = use_all_osms_for_each_gan
         self.device = device
-
-    def test_trajectory(self, start_states, end_goals, z=None, num_steps=None, state_noise=0.0, gan_ind=0):
-        if len(start_states.shape) == 1:
-            start_states = start_states[np.newaxis, ...]
-            if len(end_goals.shape) > 1:
-                if end_goals.shape[0] != 1:
-                    raise ValueError()
-            else:
-                end_goals = end_goals[np.newaxis, ...]
-        start_states = self.one_step_model.networks[0].state_scaler.transform(start_states)
-        end_goals = self.goal_scaler.transform(end_goals)
-        start_states = torch.tensor(start_states, dtype=torch.float32, device=self.device)
-        end_goals = torch.tensor(end_goals, dtype=torch.float32, device=self.device)
-        if z is None:
-            z = torch.randn(start_states.size()[0], self.latent_dim, dtype=torch.float32, device=self.device)
-        self.G_nets[gan_ind].eval()
-        gen_states, gen_actions, z_all = self.G_nets[gan_ind](z, start_states, end_goals, num_steps=num_steps,
-                                                   state_noise=state_noise)
-        if num_steps is None:
-            num_steps = self.tau
-        gen_states = self.one_step_model.networks[0].state_scaler.inverse_transform(gen_states.cpu().data.numpy().reshape(-1, self.state_dim)).reshape(start_states.size()[0], num_steps+1, self.state_dim)
-        return gen_states, gen_actions.cpu().data.numpy(), z_all.cpu().data.numpy()
 
     def test_traj_rand_gan(self, start_states, end_goals, num_steps=None, frac_replaced_with_osm_pred=0.0):
         num_gans = len(self.G_nets)
@@ -100,7 +74,7 @@ class ImaginationModule:
         end_goals: [batch x goal_dim]
         actions: [batch x tau x ac_dim]
 
-        object: remove - just for monitoring distances in testing.
+        object: just for monitoring distances in testing.
         """
         self.G_nets[gan_ind].train()
         self.D_nets[gan_ind].train()
@@ -155,32 +129,10 @@ class ImaginationModule:
         loss_G_main = d_fake.mean()
         losses["loss_G_main"] = loss_G_main.item()
         loss_G_tot = loss_G_main
-        #diversity loss
-        if self.div_sensitivity:
-            z_alt = torch.randn(batch_size, self.latent_dim, dtype=torch.float32, device=self.device)
-            gen_states_alt, gen_actions_alt, z_all_alt = self.G_nets[gan_ind](z, real_states[:, 0, :], end_goals)
-            gen_states_alt = gen_states_alt.detach()
-            if self.ds_final_only:
-                state_diff_l1 = F.l1_loss(gen_states[:, -1, :6], gen_states_alt[:, -1, :6], reduction='none').sum(dim=-1) / 6
-                z_diff_l1 = F.l1_loss(z_2.detach(), z_alt.detach(), reduction='none').sum(dim=-1) / self.latent_dim
-                ds_loss = -1 * self.ds_coef * (state_diff_l1 / (z_diff_l1 + 1e-5)).mean()
-            else:
-                state_diff_l1 = F.l1_loss(gen_states[:, 1:, :6], gen_states_alt[:, 1:, :6], reduction='none').sum(dim=(-1)) / (6)
-                z_diff_l1 = F.l1_loss(z_all.detach(), z_all_alt.detach(), reduction='none').unsqueeze(1).sum(dim=-1) / self.latent_dim
-                ds_loss = -1 * self.ds_coef* (state_diff_l1 / (z_diff_l1 + 1e-5)).mean()
-            losses["loss_DS"] = ds_loss.item()
-            loss_G_tot = loss_G_tot + ds_loss
         if self.reg_with_osm:
-            #model l2 loss - have to play around with the scalers a bit to be safe
-            #state_scale = torch.tensor(self.one_step_model.state_scaler.scale_[np.newaxis, np.newaxis, :], dtype=torch.float32, device=self.device)
-            #state_mean = torch.tensor(self.one_step_model.state_scaler.mean_[np.newaxis, np.newaxis, :], dtype=torch.float32, device=self.device)
-            #diff_scale = torch.tensor(self.one_step_model.diff_scaler.scale_[np.newaxis, np.newaxis, :], dtype=torch.float32, device=self.device)
-            #diff_mean = torch.tensor(self.one_step_model.diff_scaler.mean_[np.newaxis, np.newaxis, :], dtype=torch.float32, device=self.device)
-            #gen_states_unnorm = state_scale*gen_states + state_mean
             diff_unnorm = self.one_step_model.networks[0].scaler_transform(gen_states[:, 1:, :], "state", inverse=True) - \
                           self.one_step_model.networks[0].scaler_transform(gen_states[:, :-1, :], "state", inverse=True)
             diff = self.one_step_model.networks[0].scaler_transform(diff_unnorm, "diff", inverse=False)
-            #diff = (diff_unnorm - diff_mean) / (diff_scale+1e-6)
             num_osms = len(self.one_step_model.networks)
             if self.use_all_osms_for_each_gan:
                 pred_diff = torch.zeros(num_osms, *diff.shape, device=self.device)
@@ -189,10 +141,6 @@ class ImaginationModule:
                 pred_diff = torch.mean(pred_diff, dim=0)
             else:
                 pred_diff = self.one_step_model.networks[gan_ind](gen_states[:, :-1, :], gen_actions)
-            #if gen_states.size()[-1] > 6:
-            #    l2_loss = ((pred_diff[...,0:9]-diff[..., 0:9])**2).sum(dim=(1,2)).mean()
-            #else:
-            #    l2_loss = ((pred_diff - diff) ** 2).sum(dim=(1, 2)).mean()
             l2_loss = F.mse_loss(pred_diff, diff)
             l2_loss *= self.l2_loss_coeff
             loss_G_tot = loss_G_tot + l2_loss

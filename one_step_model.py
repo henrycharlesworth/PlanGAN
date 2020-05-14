@@ -1,7 +1,6 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
 class SimpleOneStepModel:
     """
@@ -30,8 +29,14 @@ class SimpleOneStepModel:
         action = torch.tensor(action, dtype=torch.float32, device=self.device)
         delta_s = self.networks[osm_ind](state_s, action).detach()
         delta_s_unnorm = self.networks[0].diff_scaler.inverse_transform(delta_s.cpu().data.numpy())
+        delta_s_unnorm = np.clip(delta_s_unnorm, -10.0, 10.0)
         if normed_input:
-            return self.networks[0].state_scaler.transform(state + delta_s_unnorm)
+            try:
+                return self.networks[0].state_scaler.transform(state + delta_s_unnorm)
+            except:
+                import joblib
+                joblib.dump((self.networks[0].state_scaler, state, delta_s_unnorm), "state_scaler_error.pkl")
+                return self.networks[0].state_scaler.transform(state + delta_s_unnorm + 0.01) #sometimes get weird error here...
         else:
             return state + delta_s_unnorm
 
@@ -42,7 +47,6 @@ class SimpleOneStepModel:
         actions = torch.tensor(actions, dtype=torch.float32, device=self.device)
         diff_norm = torch.tensor(self.networks[0].diff_scaler.transform(diff), dtype=torch.float32, device=self.device)
         pred_diff = self.networks[osm_ind](states_norm, actions).detach()
-        #return torch.mean((diff_norm - pred_diff) ** 2, dim=-1).cpu().data.numpy()
         return F.mse_loss(pred_diff, diff_norm)
 
     def train_on_batch(self, states, actions, next_states, osm_ind):

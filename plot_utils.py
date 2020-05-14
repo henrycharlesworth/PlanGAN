@@ -11,9 +11,10 @@ from networks import OneStepModelFC, TrajGeneratorFC, DiscriminatorFC
 from replay_buffer import ReplayBuffer
 from one_step_model import SimpleOneStepModel
 from imagination import ImaginationModule
+from planner import IterativePlanner
 from controller import Controller
 
-def load_experiment(expt_name, param_name=None, load_buffer=False, device="cuda", planner=None):
+def load_experiment(expt_name, param_name=None, load_buffer=False, device="cuda"):
     path = "experiments/"+expt_name
     params = json.load(open(path+"/experiment_args.json", "r"))
     args = Namespace(**params)
@@ -28,7 +29,7 @@ def load_experiment(expt_name, param_name=None, load_buffer=False, device="cuda"
     state_dim = env.state_dim
     ac_dim = env.ac_dim
     goal_dim = env.goal_dim
-    if args.use_osm_in_gan or args.reg_gan_with_osm:
+    if args.reg_gan_with_osm:
         train_osm = True
     else:
         train_osm = False
@@ -40,8 +41,7 @@ def load_experiment(expt_name, param_name=None, load_buffer=False, device="cuda"
     for i in range(args.num_gans):
         discrim_nets.append(DiscriminatorFC(state_dim, goal_dim, ac_dim, hidden_sizes=D_hidden_sizes).to(device))
         generator_nets.append(TrajGeneratorFC(state_dim, ac_dim, goal_dim, args.gan_latent_dim, tau,
-                                              hidden_sizes=G_hidden_sizes, use_osm=args.use_osm_in_gan,
-                                              gen_next_z=args.gen_next_z, use_same_z=args.use_same_z).to(device))
+                                              hidden_sizes=G_hidden_sizes,).to(device))
 
     OSM_opts = []
     discrim_opts = []
@@ -74,31 +74,35 @@ def load_experiment(expt_name, param_name=None, load_buffer=False, device="cuda"
 
     OSM = SimpleOneStepModel(OSM_nets, OSM_opts, l2_reg=args.l2_OSM, device=device)
     buffer = ReplayBuffer(capacity=args.buffer_capacity, obs_dim=state_dim, ac_dim=ac_dim, goal_dim=goal_dim, tau=tau,
-                          per=args.per, e=args.PER_e, a=args.PER_a, filter_train_batch=args.filter_train_batch,
-                          random_future_goals=args.random_future_goals, env_name=env.name)
+                          filter_train_batch=args.filter_train_batch, random_future_goals=args.random_future_goals, env_name=env.name)
     imagination = ImaginationModule(generator_nets, discrim_nets, generator_opts, discrim_opts, OSM,
-                                    args.gan_latent_dim, tau=tau,
-                                    div_sensitivity=args.div_sensitivity, ds_coeff=args.ds_coeff,
-                                    ds_final_only=args.ds_final_only, l2_reg_D=args.l2_D,
+                                    args.gan_latent_dim, tau=tau, l2_reg_D=args.l2_D,
                                     l2_reg_G=args.l2_G, reg_with_osm=args.reg_gan_with_osm,
                                     l2_loss_coeff=args.gan_model_l2,
                                     use_all_osms_for_each_gan=args.use_all_osms_for_each_gan, device=device)
+    planning_args = {
+        "num_acs": args.plan_num_init_acs, "max_steps": args.traj_len, "num_copies": args.plan_num_copies,
+        "num_reps": 1,
+        "num_iterations": 1, "alpha": args.plan_alpha, "osm_frac": args.planner_osm_frac,
+        "return_average": args.plan_av_ac, "tol": 0.05, "noise": 0.2
+    }
+    planner = IterativePlanner(planning_args)
+    planner.args = planning_args
     controller = Controller(env, imagination, buffer, planner, args.expt_name, init_rand_trajs=args.init_rand_trajs,
                             filter_rand_trajs=args.filter_rand_trajs,
-                            extra_trajs=args.extra_trajs, traj_len=args.traj_len, min_traj_len=args.min_traj_len,
+                            extra_trajs=args.extra_trajs, traj_len=75, min_traj_len=args.min_traj_len,
                             exploration_noise=args.exploration_noise, train_OSM=train_osm,
                             gan_batch_size=args.gan_batch_size, osm_batch_size=args.osm_batch_size,
                             init_train_gan=args.init_gan_train_its, init_train_OSM=args.init_osm_train_its,
-                            gan_train_per_extra=args.train_per_extra_gan, osm_train_per_extra=args.train_per_extra_osm,
-                            gan_train_end=args.gan_train_end, osm_train_end=args.osm_train_end)
+                            gan_train_per_extra=args.train_per_extra_gan, osm_train_per_extra=args.train_per_extra_osm)
 
     controller.load(buffer=load_buffer, name=param_name)
-    return controller
+    return controller, planner
 
 
 def generate_trajectories(imagination, env, num_trajs, object=False, start_state=None, end_goal=None,
                           start_env_state=None, plot_exact=False, plot_model=True, end_points_only=False,
-                          num_steps=None, return_diff=False, object_only=False, fixed_axes=False):
+                          num_steps=None, return_diff=False, object_only=False, fixed_axes=False, gan_ind=0):
     """
     :param imagination: has the gan and OSM
     :param env:
@@ -131,8 +135,9 @@ def generate_trajectories(imagination, env, num_trajs, object=False, start_state
         if end_goal is None:
             end_goal = obs["desired_goal"]
     tau = imagination.tau
-    imagination.netG.eval()
-    imagination.one_step_model.network.eval()
+    for i in range(len(imagination.G_nets)):
+        imagination.G_nets[i].eval()
+        imagination.one_step_model.networks[i].eval()
     vals = [] #to sort out axes at the end
     vals.append(start_state[0:3])
     vals.append(end_goal)
@@ -144,7 +149,7 @@ def generate_trajectories(imagination, env, num_trajs, object=False, start_state
     if object:
         ax.scatter(start_state[3], start_state[4], start_state[5], s=60, c="white", edgecolors="red", linewidths=2)
         vals.append(start_state[3:6])
-    gen_states, gen_actions, _ = imagination.test_trajectory(np.tile(start_state, (num_trajs, 1)), np.tile(end_goal, (num_trajs, 1)), num_steps=num_steps)
+    gen_states, gen_actions = imagination.test_traj_rand_gan(np.tile(start_state, (num_trajs, 1)), np.tile(end_goal, (num_trajs, 1)), num_steps=num_steps)
     for i in range(num_trajs):
         if object_only==False:
             if end_points_only:
@@ -214,14 +219,3 @@ def generate_trajectories(imagination, env, num_trajs, object=False, start_state
         ax.set_xlim(mid_x - max_range, mid_x + max_range)
         ax.set_ylim(mid_y - max_range, mid_y + max_range)
         ax.set_zlim(mid_z - max_range, mid_z + max_range)
-
-if __name__ == "__main__":
-    controller = load_experiment("FP_1000init_10kafter_OSMreg", param_name="final")
-
-    generate_trajectories(controller.imagination, controller.env, 10, plot_exact=True, plot_model=False, num_steps=20,
-                          object=True, object_only=False)
-    #generate_trajectories(controller.imagination, controller.env, 20, plot_exact=True, plot_model=False, num_steps=5)
-    #generate_trajectories(controller.imagination, controller.env, 1000, plot_exact=False, plot_model=False,
-    #                      end_points_only=True, num_steps=5)
-
-    print("OK")

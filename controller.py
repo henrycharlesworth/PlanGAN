@@ -9,8 +9,8 @@ class Controller:
                  filter_rand_trajs=False, extra_trajs=1000,
                  traj_len=50, min_traj_len=20, exploration_noise=0.1, train_OSM=True, gan_batch_size=64,
                  osm_batch_size=256, init_train_gan=100000, init_train_OSM=100000, gan_train_per_extra=250,
-                 osm_train_per_extra=250, gan_train_end=10000, osm_train_end=10000, gan_sampling_noise=[0.0,0.0,0.0],
-                 osm_sampling_noise=[0.0,0.0,0.0], print_every=20, eval_every=50000, eval_trajs=200):
+                 osm_train_per_extra=250, gan_sampling_noise=[0.0001,0.0001,0.0001],
+                 osm_sampling_noise=[0.0001,0.0001,0.0001], big_trains=[], print_every=20, eval_every=25000, eval_trajs=200):
         self.expt_name = expt_name
         self.path_name = "experiments/"+expt_name
         self.env = env
@@ -30,10 +30,9 @@ class Controller:
         self.init_train_OSM = init_train_OSM
         self.gan_train_per_extra = gan_train_per_extra
         self.osm_train_per_extra = osm_train_per_extra
-        self.gan_train_end = gan_train_end
-        self.osm_train_end = osm_train_end
         self.gan_sampling_noise = gan_sampling_noise
         self.osm_sampling_noise = osm_sampling_noise
+        self.big_trains = big_trains
         self.print_every = print_every
         self.eval_every = eval_every
         self.full_eval_data = []
@@ -63,10 +62,19 @@ class Controller:
             size = self.replay_buffer.curr_size
             states, _, next_states, _ = self.replay_buffer.sample_for_model_training(size)
             goals = self.replay_buffer._achieved_goals[:size, :]
-            #next_states = self.replay_buffer._next_observations[:size, :]
             states_m = states + self.osm_sampling_noise[0]*np.random.randn(size, self.env.state_dim)
             next_states_m = next_states + self.osm_sampling_noise[1]*np.random.randn(size, self.env.state_dim)
             state_diffs = next_states_m - states_m
+
+            if self.env.name.startswith("four_rooms"):
+                #manually fit these
+                rand_x = np.random.uniform(self.env.x_range[0], self.env.x_range[1], states_m.shape[0])
+                rand_y = np.random.uniform(self.env.y_range[0], self.env.y_range[1], states_m.shape[0])
+                states_m[:, 0] = rand_x
+                states_m[:, 1] = rand_y
+                goals[:, 0] = rand_x
+                goals[:, 1] = rand_y
+
             self.imagination.one_step_model.fit_scalers(states_m, state_diffs, env=self.env)
             self.imagination.fit_scalers(goals)
             #train on random data
@@ -85,12 +93,20 @@ class Controller:
             print("Time taken to generate trajs: %f seconds" % t_rand_traj)
             print("Time taken to train on random trajs: %f seconds" % t_train_rand)
             self.save(buffer=True, name="after_rand")
-            self.full_eval()
+            self.curr_env_transitions = self.num_env_transitions
+            #self.full_eval()
         if extra_trajs:
+            if len(self.big_trains)==0:
+                big_trains_at = []
+                big_train_ind = np.inf
+            else:
+                big_trains_at = (self.big_trains*self.traj_len + self.num_env_transitions).astype(int)
+                big_train_ind = 0
+
             total_env_transitions = int(self.num_env_transitions + self.traj_len*self.extra_trajs)
-            curr_env_transitions = self.num_env_transitions
+            self.curr_env_transitions = self.num_env_transitions
             fail_adds = 0
-            while curr_env_transitions < total_env_transitions:
+            while self.curr_env_transitions < total_env_transitions:
                 random = False
                 if fail_adds > 2:
                     random = True
@@ -102,41 +118,46 @@ class Controller:
                     continue
                 else:
                     fail_adds = 0
-                num_train_gan = int(self.gan_train_per_extra*(traj_len/self.traj_len))
-                num_train_osm = int(self.osm_train_per_extra*(traj_len/self.traj_len))
-                for i in range(max(num_train_gan, num_train_osm)):
-                    if i % self.print_every == 0:
-                        verbose=True
-                    else:
-                        verbose=False
-                    if i < num_train_gan:
-                        self.train_gan(self.gan_batch_size, verbose=verbose)
-                    if i < num_train_osm:
-                        self.train_model(self.osm_batch_size, verbose=verbose)
                 self.num_env_transitions += traj_len
-                curr_env_transitions += traj_len
-                if (self.num_env_transitions - self.prev_eval_at) > self.eval_every:
+                self.curr_env_transitions += traj_len
+
+                big_train = False
+                if big_train_ind < len(big_trains_at):
+                    if self.curr_env_transitions > big_trains_at[big_train_ind]:
+                        big_train_ind += 1
+                        big_train = True
+                        for i in range(max(self.init_train_gan, self.init_train_OSM)):
+                            if i % self.print_every == 0:
+                                verbose = True
+                            else:
+                                verbose = False
+                            if i < self.init_train_gan:
+                                self.train_gan(self.gan_batch_size, verbose=verbose)
+                            if i < self.init_train_OSM:
+                                self.train_model(self.osm_batch_size, verbose=verbose)
+                if big_train == False:
+                    num_train_gan = int(self.gan_train_per_extra * (traj_len / self.traj_len))
+                    num_train_osm = int(self.osm_train_per_extra * (traj_len / self.traj_len))
+                    for i in range(max(num_train_gan, num_train_osm)):
+                        if i % self.print_every == 0:
+                            verbose = True
+                        else:
+                            verbose = False
+                        if i < num_train_gan:
+                            self.train_gan(self.gan_batch_size, verbose=verbose)
+                        if i < num_train_osm:
+                            self.train_model(self.osm_batch_size, verbose=verbose)
+
+                if (self.curr_env_transitions - self.prev_eval_at) > self.eval_every:
                     self.full_eval()
                     self.save_full_eval()
-                    self.save(buffer=False, name="midnewtrajs")
-
-            self.save(buffer=True, name="after_new_trajs")
-            #final training on final buffer.
-            for i in range(max(self.gan_train_end, self.osm_train_end)):
-                if i % self.print_every == 0:
-                    verbose=True
-                else:
-                    verbose=False
-                if i < self.gan_train_end:
-                    self.train_gan(self.gan_batch_size, verbose=verbose)
-                if i < self.osm_train_end:
-                    self.train_model(self.osm_batch_size, verbose=verbose)
+                    self.save(buffer=False, name=str(self.eval_num))
             self.save(buffer=False, name="final")
             self.full_eval()
             self.save_full_eval()
             print("Number of wasted trajectories: %d" % wasted_trajs)
 
-    def generate_trajectory(self, eval=False, random=True, render=False, verbose=False):
+    def generate_trajectory(self, eval=False, random=True, render=False, verbose=False, return_path=False):
         """..."""
         for i in range(len(self.imagination.G_nets)):
             self.imagination.G_nets[i].eval()
@@ -145,6 +166,7 @@ class Controller:
 
         path = {}
         obs = self.env.reset()
+        self.planner.reset()
         curr_state = obs["observation"]
         curr_achieved_goal = obs["achieved_goal"]
         first_achieved_goal = obs["achieved_goal"]
@@ -153,6 +175,9 @@ class Controller:
         path["next_observations"] = np.zeros((self.traj_len, len(curr_state)))
         path["achieved_goals"] = np.zeros((self.traj_len, len(curr_achieved_goal)))
         path["actions"] = np.zeros((self.traj_len, self.imagination.ac_dim))
+        if return_path:
+            path["start_state"] = self.env.save_state()
+            path["end_goal"] = end_goal.copy()
         curr_step = 0
         planner_successes = 0
         goal_achieved = False
@@ -179,13 +204,32 @@ class Controller:
             curr_state = next_state
             curr_achieved_goal = obs["achieved_goal"]
             curr_step += 1
-            if self.env._is_success(curr_achieved_goal, end_goal):
-                if eval:
-                    if verbose:
-                        print("Goal achieved within %d steps!" % curr_step)
-                    return True, curr_step
-                else:
-                    goal_achieved = True
+            if self.env.name.startswith("fetch_slide"):
+                if curr_step == self.traj_len:
+                    if eval:
+                        if self.env._is_success(curr_achieved_goal, end_goal):
+                            if verbose:
+                                print("Goal achieved at end of trajectory!")
+                            return True, curr_step
+                        else:
+                            if verbose:
+                                print("Failed to achieve goal!")
+                            return False, _
+            else:
+                if self.env._is_success(curr_achieved_goal, end_goal):
+                    if eval:
+                        if verbose:
+                            print("Goal achieved within %d steps!" % curr_step)
+                        if return_path:
+                            path["observations"] = path["observations"][:curr_step, :]
+                            path["next_observations"] = path["next_observations"][:curr_step, :]
+                            path["actions"] = path["actions"][:curr_step, :]
+                            path["achieved_goals"] = path["achieved_goals"][:curr_step, :]
+                            return True, curr_step, path
+                        else:
+                            return True, curr_step
+                    else:
+                        goal_achieved = True
             if goal_achieved and curr_step >= self.min_traj_len and random == False:
                 break
 
@@ -197,14 +241,11 @@ class Controller:
         if eval:
             if verbose:
                 print("Failed to achieve goal!")
-            return False, _
-
-        if self.replay_buffer.per:
-            if random:
-                path["errors"] = np.ones((path["observations"].shape[0],))
+            if return_path:
+                return False, _, path
             else:
-                path["errors"] = self.imagination.one_step_model.get_errors(path["observations"], path["actions"],
-                                                                            path["next_observations"])
+                return False, _
+
         added = False
         if self.filter_rand_trajs == False:
             self.replay_buffer.add_path(path)
@@ -212,14 +253,24 @@ class Controller:
         else:
             final_achieved_goal = obs["achieved_goal"]
             if np.linalg.norm(first_achieved_goal - final_achieved_goal) > 0.05:
-                self.replay_buffer.add_path(path)
-                added = True
+                if self.env.name.startswith("fetch_pick_and_place"):
+                    if first_achieved_goal[2] - final_achieved_goal[2] > 0.1:
+                        added = False #block has fallen off
+                    else:
+                        self.replay_buffer.add_path(path)
+                        added = True
+                else:
+                    self.replay_buffer.add_path(path)
+                    added = True
 
         if verbose and added:
             print("Trajectory of length %d generated. Random: %r. Buffer size: %d" % (
                 path["observations"].shape[0], random, self.replay_buffer.curr_size
             ))
-        return added, curr_step#np.linalg.norm(first_achieved_goal-final_achieved_goal)#curr_step
+        if return_path:
+            return added, curr_step, path
+        else:
+            return added, curr_step
 
     def train_model(self, batch_size, verbose=False):
         if self.train_OSM == False:
@@ -229,9 +280,6 @@ class Controller:
             observations, actions, next_observations, tree_indices = \
                 self.replay_buffer.sample_for_model_training(batch_size, noise=self.osm_sampling_noise)
             m_loss, m_reg_loss = self.imagination.one_step_model.train_on_batch(observations, actions, next_observations, osm_ind=i)
-            if self.replay_buffer.per:
-                upd_errors = self.imagination.one_step_model.get_errors(observations, actions, next_observations, osm_ind=i)
-                self.replay_buffer.update_priorities(upd_errors, tree_indices)
             m_losses.append(m_loss)
             m_reg_losses.append(m_reg_loss)
             self.writer.add_scalar('loss_model_error_'+str(i), m_loss, self.train_steps_model)
@@ -283,9 +331,12 @@ class Controller:
             self.replay_buffer = joblib.load(self.path_name +"/replay_buffer.pkl")
 
     def full_eval(self):
+        orig_traj_len = self.traj_len
+        if self.env.name.startswith("fetch") or self.env.name.startswith("four_rooms") or self.env.name.startswith("reacher"):
+            self.traj_len = 50
         eval_data = {"num_env_transitions": self.num_env_transitions, "training_steps": [self.train_steps_gan, self.train_steps_model],
                      "n": self.eval_num, "buffer_size": self.replay_buffer.curr_size, "num_successes": 0, "num_steps": []}
-        self.prev_eval_at = self.num_env_transitions
+        self.prev_eval_at = self.curr_env_transitions
 
         for i in range(self.eval_trajs):
             success, num_steps = self.generate_trajectory(eval=True, random=False, verbose=False)
@@ -295,3 +346,4 @@ class Controller:
         eval_data["frac_success"] = eval_data["num_successes"] / self.eval_trajs
         self.full_eval_data.append(eval_data)
         self.eval_num += 1
+        self.traj_len = orig_traj_len
