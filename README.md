@@ -1,5 +1,7 @@
 # PlanGAN
 
+Code for our NeurIPS 2020 paper ["PlanGAN"](https://proceedings.neurips.cc/paper/2020/file/6101903146e4bbf4999c449d78441606-Paper.pdf)
+
 Requirements:
 * Mujoco-py
 * PyTorch
