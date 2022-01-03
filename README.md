@@ -11,10 +11,12 @@ Requirements:
 
 To train an agent on FetchPickAndPlace run:
 
-```python train.py --env="fetch_pick_and_place" --expt_name="FPAP"```
+```python train.py --env="fetch_push" --expt_name="FetchPush"```
 
 Pre-trained agents for FetchPush and FetchPickAndPlace are included in this repo. They can be evaluated with:
 
 ```python evaluate.py --expt_name="FetchPickAndPlace" --num_trajectories=50```
 
 We also include a Jupyter notebook that allows you to visualise the imagined trajectories that the GANs generate (visualise_trajectories.ipynb).
+
+Note that the exact hyperparameters used for the reported FetchPush and FetchPickAndPlace experiments are saved in JSON files located in the experiments folder.
